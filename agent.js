@@ -14,8 +14,14 @@ class LLMAgent {
     async loop() {
         console.log('Loop started, isProcessing:', this.isProcessing, 'messages:', this.messages.length);
         
+        let iterations = 0;
+        const maxIterations = 3; // Reduced to 3 iterations max
+        
         try {
-            while (this.messages.length > 0 && this.isProcessing) {
+            while (this.messages.length > 0 && this.isProcessing && iterations < maxIterations) {
+                iterations++;
+                console.log(`Loop iteration ${iterations}/${maxIterations}`);
+                
                 try {
                     this.updateStatus('Thinking...');
                     console.log('Calling LLM with messages:', this.messages.map(m => ({role: m.role, content: m.content?.substring(0, 50) + '...'})));
@@ -53,6 +59,11 @@ class LLMAgent {
 
                         // Add tool results to messages
                         this.messages.push(...toolResults);
+                        
+                        // IMPORTANT: Break after tool execution to prevent loops
+                        // Let the next user input trigger the next processing cycle
+                        console.log('Tool execution complete, stopping loop');
+                        break;
                     } else {
                         // No tool calls, wait for user input
                         console.log('No tool calls, stopping processing');
@@ -64,11 +75,16 @@ class LLMAgent {
                     break;
                 }
             }
+            
+            if (iterations >= maxIterations) {
+                console.warn('Loop stopped due to max iterations reached');
+                this.showWarning('Processing stopped to prevent infinite loop. Please try a different approach.');
+            }
         } finally {
             // Always reset processing state
             this.isProcessing = false;
             this.updateStatus('Ready');
-            console.log('Loop ended, isProcessing:', this.isProcessing);
+            console.log('Loop ended, isProcessing:', this.isProcessing, 'iterations:', iterations);
         }
     }
 
@@ -397,19 +413,19 @@ class LLMAgent {
         const lastMessage = messages[messages.length - 1];
         const userContent = lastMessage?.content || '';
 
-        // Check if this is a tool result message
+        // Check if this is a tool result message - provide final response
         if (lastMessage?.role === 'tool') {
             try {
                 const toolResult = JSON.parse(userContent);
                 
                 // Handle Google search results
                 if (toolResult.query && toolResult.results) {
-                    const formattedResults = toolResult.results.map((result, index) => 
+                    const formattedResults = toolResult.results.slice(0, 3).map((result, index) => 
                         `${index + 1}. **${result.title}**\n   ${result.snippet}\n   [${result.url}](${result.url})`
                     ).join('\n\n');
                     
                     return {
-                        output: `Here are the search results for "${toolResult.query}":\n\n${formattedResults}\n\nWould you like me to search for something else or help you with anything specific from these results?`,
+                        output: `Here are the search results for "${toolResult.query}":\n\n${formattedResults}\n\nThese results show the latest information about your search. Is there anything specific you'd like me to help you with from these results?`,
                         toolCalls: []
                     };
                 }
@@ -417,7 +433,7 @@ class LLMAgent {
                 // Handle AI Pipe results
                 if (toolResult.workflow && toolResult.output) {
                     return {
-                        output: `AI Pipe ${toolResult.workflow} completed:\n\n${toolResult.output}\n\nIs there anything else you'd like me to process or analyze?`,
+                        output: `AI Pipe ${toolResult.workflow} completed:\n\n${toolResult.output}\n\nThe analysis is complete. Is there anything else you'd like me to process or analyze?`,
                         toolCalls: []
                     };
                 }
@@ -429,7 +445,7 @@ class LLMAgent {
                     const error = toolResult.error ? `Error: ${toolResult.error}` : '';
                     
                     return {
-                        output: `Code execution ${status}:\n\nCode:\n\`\`\`javascript\n${toolResult.code}\n\`\`\`\n\nOutput:\n\`\`\`\n${output}\n${error}\n\`\`\`\n\nWould you like to run more code or try something else?`,
+                        output: `Code execution ${status}:\n\nCode:\n\`\`\`javascript\n${toolResult.code}\n\`\`\`\n\nOutput:\n\`\`\`\n${output}\n${error}\n\`\`\`\n\nThe code has been executed. Would you like to run more code or try something else?`,
                         toolCalls: []
                     };
                 }
@@ -442,6 +458,12 @@ class LLMAgent {
         const lastUserMessage = messages.filter(msg => msg.role === 'user').pop();
         const lastUserContent = lastUserMessage?.content || '';
         
+        // Check if we recently had tool results - avoid re-triggering tools
+        const recentToolResults = messages.slice(-3).some(msg => msg.role === 'tool');
+        const hasRecentSearch = messages.slice(-5).some(msg => 
+            msg.role === 'tool' && msg.content && msg.content.includes('"query"')
+        );
+        
         // Get conversation history for better context
         const conversationHistory = messages.filter(msg => msg.role === 'user' || msg.role === 'assistant')
             .slice(-4) // Last 4 messages for context
@@ -452,21 +474,52 @@ class LLMAgent {
         
         // Interview/Assessment requests
         if (lastUserContent.toLowerCase().includes('interview') && 
-            (lastUserContent.toLowerCase().includes('web development') || 
+            (lastUserContent.toLowerCase().includes('javascript') || 
+             lastUserContent.toLowerCase().includes('js') ||
+             lastUserContent.toLowerCase().includes('web development') || 
              lastUserContent.toLowerCase().includes('development skills') ||
              lastUserContent.toLowerCase().includes('programming'))) {
             return {
-                output: `I'd be happy to conduct a web development interview with you! Let's start with some questions:\n\n**Question 1:** Tell me about your experience with HTML, CSS, and JavaScript. What projects have you worked on recently?\n\n**Question 2:** Can you explain the difference between \`let\`, \`const\`, and \`var\` in JavaScript?\n\n**Question 3:** How do you handle responsive design? What CSS frameworks or techniques do you prefer?\n\nPlease answer these questions, and I'll ask follow-up questions based on your responses. Would you like to start with Question 1?`,
+                output: `I'd be happy to conduct a JavaScript interview with you! Let's start with some fundamental questions:\n\n**Question 1:** Can you explain the difference between \`let\`, \`const\`, and \`var\` in JavaScript?\n\n**Question 2:** What is hoisting in JavaScript? Can you give an example?\n\n**Question 3:** Explain what a closure is in JavaScript and provide a simple example.\n\nPlease answer these questions one by one, and I'll provide follow-up questions based on your responses. Let's start with Question 1 about variable declarations.`,
                 toolCalls: []
             };
         }
 
-        // Search requests
-        if (lastUserContent.toLowerCase().includes('search') || 
-            lastUserContent.toLowerCase().includes('google') ||
-            lastUserContent.toLowerCase().includes('find information') ||
-            lastUserContent.toLowerCase().includes('look up')) {
-            const searchQuery = lastUserContent.replace(/search|google|find|look up|information|for|about/gi, '').trim();
+        // Check if this is a response to an interview question
+        if (conversationHistory.includes('interview') && conversationHistory.includes('javascript')) {
+            // This appears to be part of an ongoing interview
+            if (lastUserContent.toLowerCase().includes('yes') && lastUserContent.length < 10) {
+                return {
+                    output: `Perfect! Let's begin the JavaScript interview.\n\n**Question 1:** What are the different data types in JavaScript? Please list the primitive types and explain the difference between primitive and non-primitive types.\n\n**Question 2:** Can you explain what "hoisting" means in JavaScript? Give an example of how it works with variables and functions.\n\nPlease start with Question 1 - I'm looking for a comprehensive answer about JavaScript data types.`,
+                    toolCalls: []
+                };
+            }
+            
+            // If they provided a substantial answer, ask a follow-up question
+            if (lastUserContent.length > 20) {
+                return {
+                    output: `Great answer! I can see you understand JavaScript fundamentals. Let me ask you a follow-up question:\n\n**Next Question:** Can you explain the concept of "this" in JavaScript? How does the value of "this" change in different contexts (global scope, function calls, arrow functions, event handlers)?\n\nAlso, could you write a simple example demonstrating how "this" behaves differently in a regular function vs an arrow function?`,
+                    toolCalls: []
+                };
+            }
+        }
+
+        // Search requests - but avoid re-triggering if we just had search results
+        if (!hasRecentSearch && !recentToolResults && 
+            (lastUserContent.toLowerCase().includes('search for') || 
+            lastUserContent.toLowerCase().includes('google for') ||
+            lastUserContent.toLowerCase().includes('find information about') ||
+            lastUserContent.toLowerCase().includes('look up'))) {
+            const searchQuery = lastUserContent.replace(/search for|google for|find information about|look up|search|google|find|look|about|for/gi, '').trim();
+            
+            // Avoid empty searches
+            if (searchQuery.length < 3) {
+                return {
+                    output: `I'd be happy to search for you! Please provide a more specific search term. For example: "Search for React best practices" or "Find information about JavaScript frameworks".`,
+                    toolCalls: []
+                };
+            }
+            
             return {
                 output: `I'll search for information about "${searchQuery}".`,
                 toolCalls: [{
@@ -474,7 +527,7 @@ class LLMAgent {
                     type: 'function',
                     function: {
                         name: 'google_search',
-                        arguments: JSON.stringify({ query: searchQuery || lastUserContent })
+                        arguments: JSON.stringify({ query: searchQuery })
                     }
                 }]
             };
@@ -557,6 +610,16 @@ class LLMAgent {
         }
 
         // Default intelligent response
+        const isInterviewContext = conversationHistory.includes('interview') || conversationHistory.includes('Question');
+        
+        if (isInterviewContext && lastUserContent.length > 10) {
+            // If we're in an interview context and user gave a substantial answer
+            return {
+                output: `Thank you for your response! Based on your answer, I can see you have a good understanding of JavaScript concepts.\n\n**Follow-up Question:** Can you explain the difference between synchronous and asynchronous programming in JavaScript? How do you handle asynchronous operations using callbacks, promises, and async/await?\n\nPlease provide examples if possible.`,
+                toolCalls: []
+            };
+        }
+        
         return {
             output: `I understand you're asking about "${lastUserContent}". I'm an AI agent that can help you with various tasks.\n\nBased on your question, I can:\n• **Search** for more information about this topic\n• **Analyze** the content in detail\n• **Help** you explore this further\n\nWould you like me to search for more information about "${lastUserContent}", or is there something specific you'd like me to help you with?`,
             toolCalls: []
