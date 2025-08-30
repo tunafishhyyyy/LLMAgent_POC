@@ -12,71 +12,130 @@ class LLMAgent {
     }
 
     async loop() {
-        while (this.messages.length > 0 && this.isProcessing) {
-            try {
-                this.updateStatus('Thinking...');
-                
-                const { output, toolCalls } = await this.callLLM(this.messages, this.tools.getToolDefinitions());
-                
-                if (output && output.trim()) {
-                    this.addMessage('agent', output);
-                }
-
-                if (toolCalls && toolCalls.length > 0) {
-                    this.updateStatus('Executing tools...');
+        console.log('Loop started, isProcessing:', this.isProcessing, 'messages:', this.messages.length);
+        
+        try {
+            while (this.messages.length > 0 && this.isProcessing) {
+                try {
+                    this.updateStatus('Thinking...');
+                    console.log('Calling LLM with messages:', this.messages.map(m => ({role: m.role, content: m.content?.substring(0, 50) + '...'})));
                     
-                    // Execute tool calls (potentially in parallel)
-                    const toolResults = await Promise.all(
-                        toolCalls.map(async (toolCall) => {
-                            this.addMessage('tool-call', `🔧 ${toolCall.function.name}(${JSON.stringify(toolCall.function.arguments)})`);
-                            
-                            const result = await this.tools.executeToolCall(toolCall);
-                            
-                            this.addMessage('tool-result', `✅ Result: ${JSON.stringify(result, null, 2)}`);
-                            
-                            return {
-                                tool_call_id: toolCall.id,
-                                role: 'tool',
-                                content: JSON.stringify(result)
-                            };
-                        })
-                    );
+                    const result = await this.callLLM(this.messages, this.tools.getToolDefinitions());
+                    console.log('LLM result:', result);
+                    
+                    const { output, toolCalls } = result || {};
+                    
+                    if (output && output.trim()) {
+                        console.log('Adding agent message:', output.substring(0, 100) + '...');
+                        this.addMessage('agent', output);
+                    }
 
-                    // Add tool results to messages
-                    this.messages.push(...toolResults);
-                } else {
-                    // No tool calls, wait for user input
-                    this.isProcessing = false;
-                    this.updateStatus('Ready');
+                    if (toolCalls && toolCalls.length > 0) {
+                        console.log('Processing tool calls:', toolCalls.length);
+                        this.updateStatus('Executing tools...');
+                        
+                        // Execute tool calls (potentially in parallel)
+                        const toolResults = await Promise.all(
+                            toolCalls.map(async (toolCall) => {
+                                this.addMessage('tool-call', `🔧 ${toolCall.function.name}(${JSON.stringify(toolCall.function.arguments)})`);
+                                
+                                const result = await this.tools.executeToolCall(toolCall);
+                                
+                                this.addMessage('tool-result', `✅ Result: ${JSON.stringify(result, null, 2)}`);
+                                
+                                return {
+                                    tool_call_id: toolCall.id,
+                                    role: 'tool',
+                                    content: JSON.stringify(result)
+                                };
+                            })
+                        );
+
+                        // Add tool results to messages
+                        this.messages.push(...toolResults);
+                    } else {
+                        // No tool calls, wait for user input
+                        console.log('No tool calls, stopping processing');
+                        break;
+                    }
+                } catch (error) {
+                    console.error('Loop error:', error);
+                    this.showError(`Agent error: ${error.message}`);
                     break;
                 }
-            } catch (error) {
-                this.showError(`Agent error: ${error.message}`);
-                this.isProcessing = false;
-                this.updateStatus('Error');
-                break;
             }
+        } finally {
+            // Always reset processing state
+            this.isProcessing = false;
+            this.updateStatus('Ready');
+            console.log('Loop ended, isProcessing:', this.isProcessing);
         }
     }
 
-    async callLLM(messages, tools) {
-        const provider = document.getElementById('modelProvider').value;
-        const model = document.getElementById('modelName').value;
+    cleanMessagesForAPI(messages) {
+        // Clean up messages to ensure valid conversation flow for OpenAI API
+        // Rule: 'tool' role messages must follow 'assistant' messages with tool_calls
         
-        // Get the appropriate API key based on provider
+        const cleanedMessages = [];
+        let lastMessageHadToolCalls = false;
+        
+        for (let i = 0; i < messages.length; i++) {
+            const message = messages[i];
+            
+            if (message.role === 'tool') {
+                // Only include tool messages if the previous assistant message had tool_calls
+                if (lastMessageHadToolCalls) {
+                    cleanedMessages.push(message);
+                }
+                // Skip orphaned tool messages
+                lastMessageHadToolCalls = false;
+            } else {
+                cleanedMessages.push(message);
+                // Check if this assistant message has tool_calls
+                lastMessageHadToolCalls = message.role === 'assistant' && message.tool_calls && message.tool_calls.length > 0;
+            }
+        }
+        
+        return cleanedMessages;
+    }
+
+    async callLLM(messages, tools, forceProvider = null) {
+        // Clean messages to ensure valid conversation flow
+        const cleanedMessages = this.cleanMessagesForAPI(messages);
+        console.log('Original messages:', messages.length, 'Cleaned messages:', cleanedMessages.length);
+        
+        const modelSelect = document.getElementById('modelName');
+        if (!modelSelect) {
+            throw new Error('Model select element not found');
+        }
+        
+        const model = modelSelect.value;
+        const provider = forceProvider || this.getProviderFromModel(model);
+        
+        // Handle AI Pipe routing (only if not already using AI Pipe)
+        const aipipeKeyElement = document.getElementById('aipipeApiKey');
+        if (!forceProvider && provider !== 'aipipe' && aipipeKeyElement && aipipeKeyElement.value) {
+            // Route through AI Pipe if API key is available
+            return this.callLLM(cleanedMessages, tools, 'aipipe');
+        }
+
         let apiKey;
         switch (provider) {
             case 'aipipe':
-                apiKey = document.getElementById('aipipeApiKey').value;
+                const aipipeElement = document.getElementById('aipipeApiKey');
+                apiKey = aipipeElement ? aipipeElement.value : '';
                 break;
             case 'openai':
-                apiKey = document.getElementById('openaiApiKey').value;
+                const openaiElement = document.getElementById('openaiApiKey');
+                apiKey = openaiElement ? openaiElement.value : '';
                 break;
             case 'anthropic':
-                apiKey = document.getElementById('anthropicApiKey').value;
+                const anthropicElement = document.getElementById('anthropicApiKey');
+                apiKey = anthropicElement ? anthropicElement.value : '';
                 break;
             case 'google':
-                apiKey = document.getElementById('googleApiKey').value;
+                const googleElement = document.getElementById('googleApiKey');
+                apiKey = googleElement ? googleElement.value : '';
                 break;
         }
 
@@ -84,7 +143,7 @@ class LLMAgent {
         if (!apiKey) {
             console.warn(`${provider.toUpperCase()} API key not provided, using simulation mode`);
             this.showWarning(`Using simulation mode. Add your ${provider.toUpperCase()} API key for real LLM responses.`);
-            return this.simulateLLMCall(messages, tools);
+            return this.simulateLLMCall(cleanedMessages, tools);
         }
 
         // Prepare the request based on provider
@@ -98,13 +157,17 @@ class LLMAgent {
                     'Content-Type': 'application/json',
                     'Authorization': `Bearer ${apiKey}`
                 };
+                // Simplified request - remove tools temporarily to test basic functionality
                 body = {
                     model: this.mapModelForAIPipe(model),
-                    messages: messages,
-                    tools: tools.length > 0 ? tools : undefined,
-                    tool_choice: tools.length > 0 ? 'auto' : undefined,
+                    messages: cleanedMessages,
                     max_tokens: 1000
                 };
+                // Only add tools if we have them and they're properly formatted
+                if (tools && tools.length > 0) {
+                    body.tools = tools;
+                    body.tool_choice = 'auto';
+                }
                 break;
             case 'openai':
                 apiUrl = 'https://api.openai.com/v1/chat/completions';
@@ -116,7 +179,7 @@ class LLMAgent {
                 const openaiModel = model === 'gpt-4' ? 'gpt-3.5-turbo' : model;
                 body = {
                     model: openaiModel,
-                    messages: messages,
+                    messages: cleanedMessages,
                     tools: tools,
                     tool_choice: 'auto',
                     max_tokens: 1000
@@ -130,8 +193,8 @@ class LLMAgent {
                     'anthropic-version': '2023-06-01'
                 };
                 // Convert messages format for Anthropic
-                const systemMessage = messages.find(m => m.role === 'system');
-                const userMessages = messages.filter(m => m.role !== 'system');
+                const systemMessage = cleanedMessages.find(m => m.role === 'system');
+                const userMessages = cleanedMessages.filter(m => m.role !== 'system');
                 body = {
                     model: model,
                     max_tokens: 1024,
@@ -150,7 +213,7 @@ class LLMAgent {
                         'Authorization': `Bearer ${apiKey}`
                     };
                     body = {
-                        contents: messages.map(msg => ({
+                        contents: cleanedMessages.map(msg => ({
                             parts: [{ text: msg.content }]
                         }))
                     };
@@ -160,7 +223,7 @@ class LLMAgent {
                     headers = {
                         'Content-Type': 'application/json'
                     };
-                    const contents = messages.map(msg => ({
+                    const contents = cleanedMessages.map(msg => ({
                         role: msg.role === 'assistant' ? 'model' : 'user',
                         parts: [{ text: msg.content }]
                     }));
@@ -176,6 +239,7 @@ class LLMAgent {
 
         try {
             console.log(`Making ${provider} API call to:`, apiUrl);
+            console.log(`${provider} request body:`, JSON.stringify(body, null, 2));
             const response = await fetch(apiUrl, {
                 method: 'POST',
                 headers: headers,
@@ -190,6 +254,12 @@ class LLMAgent {
                 try {
                     const errorData = await response.json();
                     console.log(`${provider} error data:`, errorData);
+                    
+                    // Log full error details for debugging
+                    if (errorData.error && errorData.error.metadata) {
+                        console.log(`${provider} error metadata:`, errorData.error.metadata);
+                    }
+                    
                     errorMessage = errorData.error?.message || errorMessage;
                     
                     // Handle specific errors
@@ -198,6 +268,11 @@ class LLMAgent {
                             errorMessage = `AI Pipe endpoint not found. Check API endpoint or try simulation mode.`;
                         } else if (provider === 'openai') {
                             errorMessage = `Model "${model}" not available. Try "gpt-3.5-turbo" instead.`;
+                        }
+                    } else if (response.status === 400 && provider === 'aipipe') {
+                        errorMessage = `AI Pipe request error: ${errorData.error?.message || 'Invalid request format'}`;
+                        if (errorData.error?.metadata) {
+                            errorMessage += ` (Details: ${JSON.stringify(errorData.error.metadata)})`;
                         }
                     } else if (response.status === 429) {
                         errorMessage = 'API quota exceeded. Check your billing or try again later.';
@@ -273,9 +348,20 @@ class LLMAgent {
                 fallbackMessage += ` (Try a different model like gpt-3.5-turbo)`;
             }
             
+            console.error('API Error Details:', {
+                provider: provider,
+                error: error.message,
+                stack: error.stack,
+                apiUrl: apiUrl
+            });
+            
             console.warn(fallbackMessage);
             this.showWarning(fallbackMessage + '. Using enhanced simulation mode.');
-            return this.simulateLLMCall(messages, tools);
+            
+            // Use original messages for simulation, not cleaned ones
+            const simulationResult = await this.simulateLLMCall(messages, tools);
+            console.log('Simulation result:', simulationResult);
+            return simulationResult;
         }
     }
 
@@ -289,7 +375,7 @@ class LLMAgent {
     mapModelForAIPipe(model) {
         // Map our model names to OpenRouter compatible names via AI Pipe
         const modelMap = {
-            'gpt-4': 'openai/gpt-4-turbo',
+            'gpt-4': 'openai/gpt-4',
             'gpt-3.5-turbo': 'openai/gpt-3.5-turbo',
             'claude-3-opus': 'anthropic/claude-3-opus',
             'claude-3-sonnet': 'anthropic/claude-3-sonnet',
@@ -674,13 +760,19 @@ function updateApiKeyLabel() {
 }
 
 function saveCredentials() {
-    const credentials = {
-        aipipeApiKey: document.getElementById('aipipeApiKey').value,
-        openaiApiKey: document.getElementById('openaiApiKey').value,
-        anthropicApiKey: document.getElementById('anthropicApiKey').value,
-        googleApiKey: document.getElementById('googleApiKey').value,
-        googleSearchEngineId: document.getElementById('googleSearchEngineId').value
-    };
+    const credentials = {};
+    
+    const aipipeElement = document.getElementById('aipipeApiKey');
+    const openaiElement = document.getElementById('openaiApiKey');
+    const anthropicElement = document.getElementById('anthropicApiKey');
+    const googleElement = document.getElementById('googleApiKey');
+    const searchEngineElement = document.getElementById('googleSearchEngineId');
+    
+    if (aipipeElement) credentials.aipipeApiKey = aipipeElement.value;
+    if (openaiElement) credentials.openaiApiKey = openaiElement.value;
+    if (anthropicElement) credentials.anthropicApiKey = anthropicElement.value;
+    if (googleElement) credentials.googleApiKey = googleElement.value;
+    if (searchEngineElement) credentials.googleSearchEngineId = searchEngineElement.value;
     
     localStorage.setItem('llmAgentCredentials', JSON.stringify(credentials));
     agent.showSuccess('Credentials saved to browser storage');
@@ -691,11 +783,17 @@ function loadCredentials() {
     if (stored) {
         const credentials = JSON.parse(stored);
         
-        document.getElementById('aipipeApiKey').value = credentials.aipipeApiKey || '';
-        document.getElementById('openaiApiKey').value = credentials.openaiApiKey || '';
-        document.getElementById('anthropicApiKey').value = credentials.anthropicApiKey || '';
-        document.getElementById('googleApiKey').value = credentials.googleApiKey || '';
-        document.getElementById('googleSearchEngineId').value = credentials.googleSearchEngineId || '';
+        const aipipeElement = document.getElementById('aipipeApiKey');
+        const openaiElement = document.getElementById('openaiApiKey');
+        const anthropicElement = document.getElementById('anthropicApiKey');
+        const googleElement = document.getElementById('googleApiKey');
+        const searchEngineElement = document.getElementById('googleSearchEngineId');
+        
+        if (aipipeElement && credentials.aipipeApiKey) aipipeElement.value = credentials.aipipeApiKey;
+        if (openaiElement && credentials.openaiApiKey) openaiElement.value = credentials.openaiApiKey;
+        if (anthropicElement && credentials.anthropicApiKey) anthropicElement.value = credentials.anthropicApiKey;
+        if (googleElement && credentials.googleApiKey) googleElement.value = credentials.googleApiKey;
+        if (searchEngineElement && credentials.googleSearchEngineId) searchEngineElement.value = credentials.googleSearchEngineId;
         
         agent.showSuccess('Credentials loaded from browser storage');
     } else {
@@ -708,12 +806,13 @@ async function testConnections() {
     const results = [];
     
     // Test AI Pipe
-    if (document.getElementById('aipipeApiKey').value) {
+    const aipipeElement = document.getElementById('aipipeApiKey');
+    if (aipipeElement && aipipeElement.value) {
         try {
             const response = await fetch('https://aipipe.org/openrouter/v1/chat/completions', {
                 method: 'POST',
                 headers: { 
-                    'Authorization': `Bearer ${document.getElementById('aipipeApiKey').value}`,
+                    'Authorization': `Bearer ${aipipeElement.value}`,
                     'Content-Type': 'application/json'
                 },
                 body: JSON.stringify({
@@ -729,10 +828,11 @@ async function testConnections() {
     }
     
     // Test OpenAI
-    if (document.getElementById('openaiApiKey').value) {
+    const openaiElement = document.getElementById('openaiApiKey');
+    if (openaiElement && openaiElement.value) {
         try {
             const response = await fetch('https://api.openai.com/v1/models', {
-                headers: { 'Authorization': `Bearer ${document.getElementById('openaiApiKey').value}` }
+                headers: { 'Authorization': `Bearer ${openaiElement.value}` }
             });
             results.push(`OpenAI: ${response.ok ? '✅ Connected' : '❌ Failed'}`);
         } catch (e) {
@@ -741,9 +841,11 @@ async function testConnections() {
     }
     
     // Test Google Search
-    if (document.getElementById('googleApiKey').value && document.getElementById('googleSearchEngineId').value) {
+    const googleElement = document.getElementById('googleApiKey');
+    const searchEngineElement = document.getElementById('googleSearchEngineId');
+    if (googleElement && googleElement.value && searchEngineElement && searchEngineElement.value) {
         try {
-            const response = await fetch(`https://www.googleapis.com/customsearch/v1?key=${document.getElementById('googleApiKey').value}&cx=${document.getElementById('googleSearchEngineId').value}&q=test`);
+            const response = await fetch(`https://www.googleapis.com/customsearch/v1?key=${googleElement.value}&cx=${searchEngineElement.value}&q=test`);
             results.push(`Google Search: ${response.ok ? '✅ Connected' : '❌ Failed'}`);
         } catch (e) {
             results.push('Google Search: ❌ Network Error');
