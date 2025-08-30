@@ -21,8 +21,8 @@
                             <div class="col-md-6">
                                 <label for="modelProvider" class="form-label">Provider</label>
                                 <select class="form-select" id="modelProvider" onchange="updateApiKeyLabel()">
+                                    <option value="openai" selected>OpenAI (Direct)</option>
                                     <option value="aipipe">AI Pipe (Proxy)</option>
-                                    <option value="openai">OpenAI (Direct)</option>
                                     <option value="anthropic">Anthropic (Direct)</option>
                                     <option value="google">Google (Direct)</option>
                                 </select>
@@ -30,8 +30,8 @@
                             <div class="col-md-6">
                                 <label for="modelName" class="form-label">Model</label>
                                 <select class="form-select" id="modelName">
-                                    <option value="gpt-4">GPT-4</option>
-                                    <option value="gpt-3.5-turbo">GPT-3.5 Turbo</option>
+                                    <option value="gpt-3.5-turbo" selected>GPT-3.5 Turbo (Recommended)</option>
+                                    <option value="gpt-4">GPT-4 (Requires billing)</option>
                                     <option value="claude-3-opus">Claude 3 Opus</option>
                                     <option value="gemini-pro">Gemini Pro</option>
                                 </select>
@@ -47,7 +47,7 @@
                                 <div class="col-12">
                                     <label for="aipipeApiKey" class="form-label">AI Pipe API Key</label>
                                     <input type="password" class="form-control" id="aipipeApiKey" placeholder="Enter your AI Pipe API key">
-                                    <small class="form-text text-muted">For routing LLM calls through https://aipipe.org/</small>
+                                    <small class="form-text text-muted">Get from https://aipipe.org/ - Routes to multiple LLM providers</small>
                                 </div>
                             </div>
                             
@@ -56,7 +56,7 @@
                                 <div class="col-12">
                                     <label for="openaiApiKey" class="form-label">OpenAI API Key</label>
                                     <input type="password" class="form-control" id="openaiApiKey" placeholder="Enter your OpenAI API key">
-                                    <small class="form-text text-muted">Get from https://platform.openai.com/</small>
+                                    <small class="form-text text-muted">Get from https://platform.openai.com/ - Requires billing setup for GPT-4</small>
                                 </div>
                             </div>
                             

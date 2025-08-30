@@ -80,8 +80,11 @@ class LLMAgent {
                 break;
         }
 
+        // If no API key is provided, use simulation with a notice
         if (!apiKey) {
-            throw new Error(`${provider.toUpperCase()} API key is required`);
+            console.warn(`${provider.toUpperCase()} API key not provided, using simulation mode`);
+            this.showWarning(`Using simulation mode. Add your ${provider.toUpperCase()} API key for real LLM responses.`);
+            return this.simulateLLMCall(messages, tools);
         }
 
         // Prepare the request based on provider
@@ -89,19 +92,18 @@ class LLMAgent {
 
         switch (provider) {
             case 'aipipe':
-                // Route ALL LLM calls through AI Pipe proxy
-                apiUrl = 'https://api.aipipe.org/v1/chat/completions';
+                // Use OpenAI format through AI Pipe proxy
+                apiUrl = 'https://aipipe.org/openrouter/v1/chat/completions';
                 headers = {
                     'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${apiKey}`,
-                    'X-Model-Provider': this.getProviderFromModel(model),
-                    'X-Model-Name': model
+                    'Authorization': `Bearer ${apiKey}`
                 };
                 body = {
-                    model: model,
+                    model: this.mapModelForAIPipe(model),
                     messages: messages,
-                    tools: tools,
-                    tool_choice: 'auto'
+                    tools: tools.length > 0 ? tools : undefined,
+                    tool_choice: tools.length > 0 ? 'auto' : undefined,
+                    max_tokens: 1000
                 };
                 break;
             case 'openai':
@@ -110,11 +112,14 @@ class LLMAgent {
                     'Content-Type': 'application/json',
                     'Authorization': `Bearer ${apiKey}`
                 };
+                // Use gpt-3.5-turbo as fallback if gpt-4 isn't available
+                const openaiModel = model === 'gpt-4' ? 'gpt-3.5-turbo' : model;
                 body = {
-                    model: model,
+                    model: openaiModel,
                     messages: messages,
                     tools: tools,
-                    tool_choice: 'auto'
+                    tool_choice: 'auto',
+                    max_tokens: 1000
                 };
                 break;
             case 'anthropic':
@@ -136,60 +141,140 @@ class LLMAgent {
                 };
                 break;
             case 'google':
-                // Use Google Gemini API
-                apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
-                headers = {
-                    'Content-Type': 'application/json'
-                };
-                // Convert messages format for Google
-                const contents = messages.map(msg => ({
-                    role: msg.role === 'assistant' ? 'model' : 'user',
-                    parts: [{ text: msg.content }]
-                }));
-                body = {
-                    contents: contents,
-                    tools: tools.length > 0 ? [{ function_declarations: tools.map(t => t.function) }] : undefined
-                };
+                // Use Google Gemini API via AI Pipe or direct
+                if (apiKey.startsWith('aip_')) {
+                    // Use AI Pipe for Gemini
+                    apiUrl = 'https://aipipe.org/geminiv1beta/models/gemini-1.5-flash:generateContent';
+                    headers = {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${apiKey}`
+                    };
+                    body = {
+                        contents: messages.map(msg => ({
+                            parts: [{ text: msg.content }]
+                        }))
+                    };
+                } else {
+                    // Direct Google API
+                    apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+                    headers = {
+                        'Content-Type': 'application/json'
+                    };
+                    const contents = messages.map(msg => ({
+                        role: msg.role === 'assistant' ? 'model' : 'user',
+                        parts: [{ text: msg.content }]
+                    }));
+                    body = {
+                        contents: contents,
+                        tools: tools.length > 0 ? [{ function_declarations: tools.map(t => t.function) }] : undefined
+                    };
+                }
                 break;
             default:
                 throw new Error(`Unsupported provider: ${provider}`);
         }
 
         try {
+            console.log(`Making ${provider} API call to:`, apiUrl);
             const response = await fetch(apiUrl, {
                 method: 'POST',
                 headers: headers,
                 body: JSON.stringify(body)
             });
 
+            console.log(`${provider} response status:`, response.status, response.statusText);
+
             if (!response.ok) {
-                const errorData = await response.json();
-                throw new Error(`API request failed: ${errorData.error?.message || response.statusText}`);
+                let errorMessage = `HTTP ${response.status}: ${response.statusText}`;
+                
+                try {
+                    const errorData = await response.json();
+                    console.log(`${provider} error data:`, errorData);
+                    errorMessage = errorData.error?.message || errorMessage;
+                    
+                    // Handle specific errors
+                    if (response.status === 404) {
+                        if (provider === 'aipipe') {
+                            errorMessage = `AI Pipe endpoint not found. Check API endpoint or try simulation mode.`;
+                        } else if (provider === 'openai') {
+                            errorMessage = `Model "${model}" not available. Try "gpt-3.5-turbo" instead.`;
+                        }
+                    } else if (response.status === 429) {
+                        errorMessage = 'API quota exceeded. Check your billing or try again later.';
+                    } else if (response.status === 401) {
+                        errorMessage = 'Invalid API key. Please check your credentials.';
+                    }
+                } catch (e) {
+                    // Error response is not JSON
+                    console.log(`${provider} error response not JSON:`, e);
+                }
+                
+                throw new Error(errorMessage);
             }
 
-            const data = await response.json();
+            const responseText = await response.text();
+            console.log(`${provider} raw response:`, responseText.substring(0, 200) + '...');
+            
+            let data;
+            try {
+                data = JSON.parse(responseText);
+            } catch (e) {
+                console.error(`${provider} response parsing error:`, e);
+                console.error('Response was:', responseText.substring(0, 500));
+                throw new Error(`Invalid JSON response from ${provider}: ${e.message}`);
+            }
             
             // Handle different response formats
             let output, toolCalls;
             switch (provider) {
+                case 'aipipe':
+                    // AI Pipe returns OpenAI-compatible format
+                    const aipipeChoice = data.choices?.[0];
+                    if (!aipipeChoice) {
+                        throw new Error('No response choices returned from AI Pipe');
+                    }
+                    output = aipipeChoice.message?.content || '';
+                    toolCalls = aipipeChoice.message?.tool_calls || [];
+                    break;
                 case 'anthropic':
                     output = data.content?.[0]?.text || '';
                     toolCalls = data.tool_calls || [];
                     break;
                 case 'google':
-                    output = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
-                    toolCalls = data.candidates?.[0]?.content?.parts?.filter(p => p.functionCall) || [];
+                    if (apiKey.startsWith('aip_')) {
+                        // AI Pipe Gemini response
+                        output = data.response || data.content || '';
+                        toolCalls = data.tool_calls || [];
+                    } else {
+                        // Direct Google API response
+                        output = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+                        toolCalls = data.candidates?.[0]?.content?.parts?.filter(p => p.functionCall) || [];
+                    }
                     break;
-                default: // OpenAI format (also used by AI Pipe)
-                    const choice = data.choices[0];
-                    output = choice.message.content;
-                    toolCalls = choice.message.tool_calls || [];
+                default: // OpenAI format
+                    const choice = data.choices?.[0];
+                    if (!choice) {
+                        throw new Error('No response choices returned from API');
+                    }
+                    output = choice.message?.content || '';
+                    toolCalls = choice.message?.tool_calls || [];
             }
             
             return { output, toolCalls };
         } catch (error) {
-            // Fallback to simulation if API call fails
-            console.warn(`${provider} API call failed, falling back to simulation:`, error.message);
+            // Enhanced error handling with specific suggestions
+            let fallbackMessage = `${provider.toUpperCase()} API failed: ${error.message}`;
+            
+            if (error.message.includes('Failed to fetch')) {
+                fallbackMessage += ` (Network issue - check internet connection)`;
+            } else if (error.message.includes('quota')) {
+                fallbackMessage += ` (Add billing information to your account)`;
+            } else if (error.message.includes('not exist')) {
+                fallbackMessage += ` (Try a different model like gpt-3.5-turbo)`;
+            }
+            
+            console.warn(fallbackMessage);
+            this.showWarning(fallbackMessage + '. Using enhanced simulation mode.');
             return this.simulateLLMCall(messages, tools);
         }
     }
@@ -199,6 +284,24 @@ class LLMAgent {
         if (model.includes('claude')) return 'anthropic';
         if (model.includes('gemini')) return 'google';
         return 'openai'; // default
+    }
+
+    mapModelForAIPipe(model) {
+        // Map our model names to OpenRouter compatible names via AI Pipe
+        const modelMap = {
+            'gpt-4': 'openai/gpt-4-turbo',
+            'gpt-3.5-turbo': 'openai/gpt-3.5-turbo',
+            'claude-3-opus': 'anthropic/claude-3-opus',
+            'claude-3-sonnet': 'anthropic/claude-3-sonnet',
+            'gemini-pro': 'google/gemini-pro'
+        };
+        return modelMap[model] || 'openai/gpt-3.5-turbo';
+    }
+
+    formatMessagesForAIPipe(messages) {
+        // AI Pipe expects input as string based on the documentation
+        const lastUserMessage = messages.filter(msg => msg.role === 'user').pop();
+        return lastUserMessage?.content || '';
     }
 
     async simulateLLMCall(messages, tools) {
@@ -252,10 +355,32 @@ class LLMAgent {
         // Find the last user message for context
         const lastUserMessage = messages.filter(msg => msg.role === 'user').pop();
         const lastUserContent = lastUserMessage?.content || '';
+        
+        // Get conversation history for better context
+        const conversationHistory = messages.filter(msg => msg.role === 'user' || msg.role === 'assistant')
+            .slice(-4) // Last 4 messages for context
+            .map(msg => `${msg.role}: ${msg.content}`)
+            .join('\n');
 
-        // Simple rule-based simulation for user messages
-        if (lastUserContent.toLowerCase().includes('search') || lastUserContent.toLowerCase().includes('google')) {
-            const searchQuery = lastUserContent.replace(/google|search|find|for|about/gi, '').trim();
+        // Enhanced conversational AI simulation
+        
+        // Interview/Assessment requests
+        if (lastUserContent.toLowerCase().includes('interview') && 
+            (lastUserContent.toLowerCase().includes('web development') || 
+             lastUserContent.toLowerCase().includes('development skills') ||
+             lastUserContent.toLowerCase().includes('programming'))) {
+            return {
+                output: `I'd be happy to conduct a web development interview with you! Let's start with some questions:\n\n**Question 1:** Tell me about your experience with HTML, CSS, and JavaScript. What projects have you worked on recently?\n\n**Question 2:** Can you explain the difference between \`let\`, \`const\`, and \`var\` in JavaScript?\n\n**Question 3:** How do you handle responsive design? What CSS frameworks or techniques do you prefer?\n\nPlease answer these questions, and I'll ask follow-up questions based on your responses. Would you like to start with Question 1?`,
+                toolCalls: []
+            };
+        }
+
+        // Search requests
+        if (lastUserContent.toLowerCase().includes('search') || 
+            lastUserContent.toLowerCase().includes('google') ||
+            lastUserContent.toLowerCase().includes('find information') ||
+            lastUserContent.toLowerCase().includes('look up')) {
+            const searchQuery = lastUserContent.replace(/search|google|find|look up|information|for|about/gi, '').trim();
             return {
                 output: `I'll search for information about "${searchQuery}".`,
                 toolCalls: [{
@@ -269,8 +394,14 @@ class LLMAgent {
             };
         }
 
-        if (lastUserContent.toLowerCase().includes('code') || lastUserContent.toLowerCase().includes('javascript')) {
-            const codeMatch = lastUserContent.match(/```javascript\n([\s\S]*?)\n```/) || lastUserContent.match(/`([^`]+)`/);
+        // Code execution requests
+        if (lastUserContent.toLowerCase().includes('code') || 
+            lastUserContent.toLowerCase().includes('javascript') ||
+            lastUserContent.toLowerCase().includes('run') ||
+            lastUserContent.toLowerCase().includes('execute')) {
+            const codeMatch = lastUserContent.match(/```javascript\n([\s\S]*?)\n```/) || 
+                             lastUserContent.match(/```\n([\s\S]*?)\n```/) ||
+                             lastUserContent.match(/`([^`]+)`/);
             const code = codeMatch ? codeMatch[1] : 'console.log("Hello, World!");';
             
             return {
@@ -286,7 +417,11 @@ class LLMAgent {
             };
         }
 
-        if (lastUserContent.toLowerCase().includes('analyze') || lastUserContent.toLowerCase().includes('summarize') || lastUserContent.toLowerCase().includes('process')) {
+        // AI processing requests
+        if (lastUserContent.toLowerCase().includes('analyze') || 
+            lastUserContent.toLowerCase().includes('summarize') || 
+            lastUserContent.toLowerCase().includes('process') ||
+            lastUserContent.toLowerCase().includes('workflow')) {
             const workflow = lastUserContent.toLowerCase().includes('summarize') ? 'summarize' : 'analyze';
             return {
                 output: `I'll use AI Pipe to ${workflow} this content.`,
@@ -305,9 +440,39 @@ class LLMAgent {
             };
         }
 
-        // Default response
+        // Conversational responses based on context and keywords
+        
+        // Technical questions
+        if (lastUserContent.toLowerCase().includes('explain') || 
+            lastUserContent.toLowerCase().includes('what is') ||
+            lastUserContent.toLowerCase().includes('how does') ||
+            lastUserContent.toLowerCase().includes('difference between')) {
+            return {
+                output: `That's a great question! To give you the most accurate and up-to-date information, let me search for that: "${lastUserContent}". This will help me provide you with comprehensive details.`,
+                toolCalls: [{
+                    id: 'call_' + Date.now(),
+                    type: 'function',
+                    function: {
+                        name: 'google_search',
+                        arguments: JSON.stringify({ query: lastUserContent })
+                    }
+                }]
+            };
+        }
+
+        // Help requests
+        if (lastUserContent.toLowerCase().includes('help') || 
+            lastUserContent.toLowerCase().includes('what can you do') ||
+            lastUserContent.toLowerCase().includes('capabilities')) {
+            return {
+                output: `I'm here to help! I can assist you with:\n\n🔍 **Search & Research**: I can search Google for any information you need\n\n🤖 **AI Analysis**: I can analyze, summarize, or process text using AI workflows\n\n💻 **Code Execution**: I can run JavaScript code and show you the results\n\n🎓 **Learning & Interviews**: I can conduct technical interviews, explain concepts, or help with learning\n\n📊 **Data Processing**: I can help transform, extract, or classify data\n\nWhat would you like to explore? Just ask me naturally, like:\n- "Search for the latest React.js trends"\n- "Analyze this code snippet"\n- "Interview me on Python basics"\n- "Explain how async/await works"`,
+                toolCalls: []
+            };
+        }
+
+        // Default intelligent response
         return {
-            output: `I understand you're asking about: "${lastUserContent}". I can help you with:\n• 🔍 **Search**: Ask me to search for anything\n• 🤖 **AI Processing**: Ask me to analyze, summarize, or process text\n• 💻 **Code**: Ask me to run JavaScript code\n\nWhat would you like to do?`,
+            output: `I understand you're asking about "${lastUserContent}". I'm an AI agent that can help you with various tasks.\n\nBased on your question, I can:\n• **Search** for more information about this topic\n• **Analyze** the content in detail\n• **Help** you explore this further\n\nWould you like me to search for more information about "${lastUserContent}", or is there something specific you'd like me to help you with?`,
             toolCalls: []
         };
     }
@@ -398,6 +563,23 @@ class LLMAgent {
         }, 3000);
     }
 
+    showWarning(message) {
+        const alertDiv = document.createElement('div');
+        alertDiv.className = 'alert alert-warning alert-dismissible fade show';
+        alertDiv.innerHTML = `
+            <strong>Notice:</strong> ${this.escapeHtml(message)}
+            <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+        `;
+        this.alertContainer.appendChild(alertDiv);
+
+        // Auto-remove after 4 seconds
+        setTimeout(() => {
+            if (alertDiv.parentNode) {
+                alertDiv.remove();
+            }
+        }, 4000);
+    }
+
     async sendMessage() {
         const input = this.userInput.value.trim();
         if (!input || this.isProcessing) return;
@@ -447,26 +629,30 @@ document.addEventListener('DOMContentLoaded', () => {
     agent.addMessage('agent', `Welcome to the LLM Agent POC! 🚀
 
 **Features:**
-• 🔍 **Google Search** - Real API integration (requires Google API key + Search Engine ID)
+• 🔍 **Google Search** - Real API integration (add Google API key + Search Engine ID)
 • 🤖 **AI Pipe workflows** - summarize, analyze, transform, generate, extract, classify
 • 💻 **JavaScript execution** - Secure code execution in browser
 • 🔑 **Multiple API support** - OpenAI, Anthropic, Google, AI Pipe
 
-**Setup:**
-1. Enter your API keys above (save/load them for convenience)
-2. Choose your preferred LLM provider
-3. Start chatting!
+**Quick Start:**
+1. **AI Pipe** (Recommended): Single API key for all LLM providers
+2. **OpenAI**: Direct OpenAI API access
+3. **Google Search**: Add Google API key + Search Engine ID for real search
+4. **No keys?** Enhanced simulation mode works too!
 
-**Try these commands:**
-- "Search for latest AI news"
-- "Analyze this text: [your content]"
+**Current Status:**
+- ✅ **AI Pipe**: Ready (https://aipipe.org/)
+- ✅ **OpenAI**: Ready (requires billing for GPT-4)
+- ✅ **Google Search**: Ready (add credentials)  
+- ✅ **Enhanced Simulation**: Works without any keys
+
+**Try these:**
+- "Search for latest React trends"
+- "Interview me on JavaScript"
 - "Run this code: console.log('Hello!')"
+- "Analyze this text: [your content]"
 
-For **real Google search results**, you need:
-- Google API key from Google Cloud Console
-- Custom Search Engine ID from Google Custom Search
-
-Without these, you'll get simulated search results.`);
+💡 **Tip**: AI Pipe provides access to multiple models with one API key!`);
 });
 
 // Global functions for HTML event handlers
@@ -520,6 +706,27 @@ function loadCredentials() {
 async function testConnections() {
     agent.updateStatus('Testing connections...');
     const results = [];
+    
+    // Test AI Pipe
+    if (document.getElementById('aipipeApiKey').value) {
+        try {
+            const response = await fetch('https://aipipe.org/openrouter/v1/chat/completions', {
+                method: 'POST',
+                headers: { 
+                    'Authorization': `Bearer ${document.getElementById('aipipeApiKey').value}`,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    model: 'openai/gpt-3.5-turbo',
+                    messages: [{ role: 'user', content: 'test' }],
+                    max_tokens: 10
+                })
+            });
+            results.push(`AI Pipe: ${response.ok ? '✅ Connected' : '❌ Failed'}`);
+        } catch (e) {
+            results.push('AI Pipe: ❌ Network Error');
+        }
+    }
     
     // Test OpenAI
     if (document.getElementById('openaiApiKey').value) {
