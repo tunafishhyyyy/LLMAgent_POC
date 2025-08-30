@@ -47,7 +47,29 @@ class LLMAgent {
                                 
                                 const result = await this.tools.executeToolCall(toolCall);
                                 
-                                this.addMessage('tool-result', `✅ Result: ${JSON.stringify(result, null, 2)}`);
+                                // Format tool result for display
+                                let displayResult;
+                                if (toolCall.function.name === 'google_search' && result.results) {
+                                    // Format search results nicely
+                                    const formattedResults = result.results.slice(0, 5).map((searchResult, index) => 
+                                        `**${index + 1}. ${searchResult.title}**\n${searchResult.snippet}\n🔗 [${searchResult.displayLink}](${searchResult.url})`
+                                    ).join('\n\n');
+                                    displayResult = `## Search Results for "${result.query}"\n\n${formattedResults}\n\n📊 Total results: ${result.totalResults} • Source: ${result.source}`;
+                                } else if (toolCall.function.name === 'execute_javascript') {
+                                    // Format code execution results
+                                    const status = result.success ? '✅ Success' : '❌ Error';
+                                    const output = result.output || '';
+                                    const error = result.error ? `\n**Error:** ${result.error}` : '';
+                                    displayResult = `**Code Execution ${status}**\n\n\`\`\`javascript\n${result.code}\n\`\`\`\n\n**Output:**\n\`\`\`\n${output}\`\`\`${error}`;
+                                } else if (toolCall.function.name === 'aipipe_workflow') {
+                                    // Format AI Pipe results
+                                    displayResult = `**AI Pipe ${result.workflow || 'Workflow'} Complete**\n\n${result.output || result.response || JSON.stringify(result, null, 2)}`;
+                                } else {
+                                    // Fallback to JSON for unknown tools
+                                    displayResult = JSON.stringify(result, null, 2);
+                                }
+                                
+                                this.addMessage('tool-result', `✅ ${displayResult}`);
                                 
                                 return {
                                     tool_call_id: toolCall.id,
