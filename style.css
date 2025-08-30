@@ -1,0 +1,99 @@
+/* LLM Agent POC Styles */
+
+body {
+    background-color: #f8f9fa;
+}
+
+.conversation-message {
+    margin-bottom: 15px;
+    padding: 10px;
+    border-radius: 8px;
+}
+
+.user-message {
+    background-color: #e3f2fd;
+    border-left: 4px solid #2196f3;
+}
+
+.agent-message {
+    background-color: #f3e5f5;
+    border-left: 4px solid #9c27b0;
+}
+
+.tool-call-message {
+    background-color: #fff3e0;
+    border-left: 4px solid #ff9800;
+    font-family: 'Courier New', monospace;
+    font-size: 0.9em;
+}
+
+.tool-result-message {
+    background-color: #e8f5e8;
+    border-left: 4px solid #4caf50;
+    font-family: 'Courier New', monospace;
+    font-size: 0.9em;
+}
+
+.message-timestamp {
+    font-size: 0.8em;
+    color: #666;
+    margin-top: 5px;
+}
+
+.code-execution-result {
+    background-color: #f5f5f5;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    padding: 10px;
+    margin-top: 10px;
+    font-family: 'Courier New', monospace;
+    white-space: pre-wrap;
+}
+
+.loading-spinner {
+    display: inline-block;
+    width: 20px;
+    height: 20px;
+    border: 3px solid #f3f3f3;
+    border-top: 3px solid #3498db;
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+}
+
+.tool-badge {
+    font-size: 0.7em;
+    margin-right: 5px;
+}
+
+.card-header h5 {
+    color: #495057;
+}
+
+#conversationWindow {
+    background-color: white;
+    border: 1px solid #dee2e6;
+    border-radius: 0.375rem;
+}
+
+#conversationWindow::-webkit-scrollbar {
+    width: 8px;
+}
+
+#conversationWindow::-webkit-scrollbar-track {
+    background: #f1f1f1;
+    border-radius: 4px;
+}
+
+#conversationWindow::-webkit-scrollbar-thumb {
+    background: #c1c1c1;
+    border-radius: 4px;
+}
+
+#conversationWindow::-webkit-scrollbar-thumb:hover {
+    background: #a8a8a8;
+}
